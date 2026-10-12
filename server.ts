@@ -294,33 +294,37 @@ export default async function plugin(bb: BbPluginApi) {
     let journalTraceId: string | null = null;
     const journalIdPattern = /\d{8}-activity-journal/;
 
+    async function writeJournalLine(line: string) {
+      if (!journalTraceId) {
+        // Re-discover the journal after a plugin restart; create it once.
+        const found = await client.callTool(serverTools.noema_search, { query: "Activity journal" });
+        journalTraceId = JSON.stringify(found).match(journalIdPattern)?.[0] ?? null;
+      }
+      if (!journalTraceId) {
+        const created = await client.callTool(serverTools.noema_remember, {
+          title: "Activity journal",
+          type: "note",
+          tags: "journal,bb",
+          body: "# BB thread activity journal\n",
+        });
+        journalTraceId = JSON.stringify(created).match(journalIdPattern)?.[0] ?? null;
+      }
+      if (!journalTraceId) {
+        bb.log.warn("[noema] could not resolve activity journal trace id");
+        return;
+      }
+      await client.callTool("append_trace", { id: journalTraceId, content: line });
+    }
+
     bb.events.on("thread.idle", ({ thread }) => {
-      (async () => {
-        try {
-          if (!journalTraceId) {
-            // Re-discover the journal after a plugin restart; create it once.
-            const found = await client.callTool(serverTools.noema_search, { query: "Activity journal" });
-            journalTraceId = JSON.stringify(found).match(journalIdPattern)?.[0] ?? null;
-          }
-          if (!journalTraceId) {
-            const created = await client.callTool(serverTools.noema_remember, {
-              title: "Activity journal",
-              type: "note",
-              tags: "journal,bb",
-              body: "# BB thread activity journal\n",
-            });
-            journalTraceId = JSON.stringify(created).match(journalIdPattern)?.[0] ?? null;
-          }
-          if (!journalTraceId) {
-            bb.log.warn("[noema] could not resolve activity journal trace id");
-            return;
-          }
-          const line = `- ${new Date().toISOString()} thread ${thread.id} (project ${thread.projectId}) went idle`;
-          await client.callTool("append_trace", { id: journalTraceId, content: line });
-        } catch (e) {
-          bb.log.warn(`[noema] activity journal write failed: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      })();
+      writeJournalLine(`- ${new Date().toISOString()} thread ${thread.id} (project ${thread.projectId}) went idle`)
+        .catch((e) => bb.log.warn(`[noema] activity journal write failed: ${e instanceof Error ? e.message : String(e)}`));
+    });
+
+    bb.events.on("thread.failed", ({ thread, error }) => {
+      bb.log.warn(`[noema] thread ${thread.id} failed${error ? `: ${error}` : ""}`);
+      writeJournalLine(`- ${new Date().toISOString()} FAILED thread ${thread.id} (project ${thread.projectId})${error ? `: ${error}` : ""}`)
+        .catch((e) => bb.log.warn(`[noema] activity journal write failed: ${e instanceof Error ? e.message : String(e)}`));
     });
   }
 
