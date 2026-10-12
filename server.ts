@@ -174,6 +174,12 @@ export default async function plugin(bb: BbPluginApi) {
       default: process.env.NOEMA_HTTP_URL ?? "http://127.0.0.1:3004",
       description: "Your local Noema server's Streamable HTTP MCP endpoint (noema serve --transport http)",
     },
+    noemaActivityJournal: {
+      type: "boolean",
+      label: "Activity journal",
+      default: true,
+      description: "Append one metadata line to an 'Activity journal' trace in Noema whenever a thread goes idle",
+    },
     noemaAccessKey: {
       type: "string",
       label: "MCP access key",
@@ -182,13 +188,11 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  let { noemaHttpUrl, noemaAccessKey } = await settings.get();
+  let { noemaHttpUrl, noemaAccessKey, noemaActivityJournal } = await settings.get();
 
   // Re-read settings on change without a plugin reload.
   settings.onChange((next) => {
-    noemaHttpUrl = next.noemaHttpUrl;
-    noemaAccessKey = next.noemaAccessKey;
-    // Rebuild the client so new URL/key take effect immediately.
+    ({ noemaHttpUrl, noemaAccessKey, noemaActivityJournal } = next);
     client = new NoemaClient(noemaHttpUrl, noemaAccessKey || undefined);
     bb.log.info(`[noema] server URL updated → ${noemaHttpUrl}`);
   });
@@ -281,6 +285,44 @@ export default async function plugin(bb: BbPluginApi) {
       return typeof result === "string" ? result : JSON.stringify(result, null, 2);
     },
   });
+
+  // ── Activity journal ──────────────────────────────────────────────
+  // Observe-only side channel: one metadata line per idle transition in a
+  // dedicated "Activity journal" trace. Never injects into conversations
+  // and never stores thread content — only when a thread finished.
+  if (noemaActivityJournal) {
+    let journalTraceId: string | null = null;
+    const journalIdPattern = /\d{8}-activity-journal/;
+
+    bb.events.on("thread.idle", ({ thread }) => {
+      (async () => {
+        try {
+          if (!journalTraceId) {
+            // Re-discover the journal after a plugin restart; create it once.
+            const found = await client.callTool(serverTools.noema_search, { query: "Activity journal" });
+            journalTraceId = JSON.stringify(found).match(journalIdPattern)?.[0] ?? null;
+          }
+          if (!journalTraceId) {
+            const created = await client.callTool(serverTools.noema_remember, {
+              title: "Activity journal",
+              type: "note",
+              tags: "journal,bb",
+              body: "# BB thread activity journal\n",
+            });
+            journalTraceId = JSON.stringify(created).match(journalIdPattern)?.[0] ?? null;
+          }
+          if (!journalTraceId) {
+            bb.log.warn("[noema] could not resolve activity journal trace id");
+            return;
+          }
+          const line = `- ${new Date().toISOString()} thread ${thread.id} (project ${thread.projectId}) went idle`;
+          await client.callTool("append_trace", { id: journalTraceId, content: line });
+        } catch (e) {
+          bb.log.warn(`[noema] activity journal write failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      })();
+    });
+  }
 
   // ── Cleanup ──────────────────────────────────────────────────────
 
