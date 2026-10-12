@@ -1,2 +1,11 @@
 node_modules/
 .DS_Store
+
+# Dependencies & logs
+npm-debug.log*
+yarn-error.log
+
+# Editor/OS noise
+*.swp
+.idea/
+.vscode/
