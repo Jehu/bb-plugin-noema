@@ -47,7 +47,7 @@ class NoemaClient {
     const body = JSON.stringify({
       jsonrpc: "2.0",
       method: "initialize",
-      params: { protocolVersion: "2025-03-26", capabilities: {} },
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "bb-plugin-noema", version: "0.2.1" } },
       id: 1,
     });
 
@@ -66,7 +66,7 @@ class NoemaClient {
     // initialize result (message id 1).
     let gotInit = false;
     for (const line of text.split("\n")) {
-      if (line.startsWith("data: ")) {
+      if (line.startsWith("data: ") && line.length > 6) {
         const msg = JSON.parse(line.slice(6));
         if (msg.id === 1) {
           gotInit = true;
@@ -74,8 +74,15 @@ class NoemaClient {
         }
       }
     }
+
     if (!gotInit) throw new Error("Noema init: no initialize response in SSE stream");
     if (!sid) throw new Error("Noema init: no Mcp-Session-Id header");
+    // Noema 0.22.x requires the initialized notification before serving tool calls
+    await fetch(`${this.baseUrl}/mcp`, {
+      method: "POST",
+      headers: { ...this.authHeaders(), "Mcp-Session-Id": sid },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    });
     this.sessionId = sid;
   }
 
@@ -109,7 +116,7 @@ class NoemaClient {
 
     const text = await resp.text();
     for (const line of text.split("\n")) {
-      if (line.startsWith("data: ")) {
+      if (line.startsWith("data: ") && line.length > 6) {
         const msg = JSON.parse(line.slice(6));
         if (msg.id === 2) {
           if (msg.error) {
@@ -190,6 +197,15 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.log.info(`Noema client → ${noemaHttpUrl} (local Noema server)`);
 
+  // Noema 0.22.x renamed its MCP tools; map agent-facing names to server tools.
+  const serverTools = {
+    noema_search: "search_traces",
+    noema_remember: "create_trace",
+    noema_recall: "get_trace",
+    noema_list: "list_traces",
+    noema_update: "update_trace",
+    noema_lineage: "trace_lineage",
+  };
   // ── Register agent tools ─────────────────────────────────────────
 
   bb.agents.registerTool({
@@ -198,7 +214,7 @@ export default async function plugin(bb: BbPluginApi) {
     parameters: searchSchema,
     async execute({ query }, { threadId }) {
       bb.log.info(`[noema] thread ${threadId}: noema_search '${query}'`);
-      const result = await client.callTool("noema_search", { query });
+      const result = await client.callTool(serverTools.noema_search, { query });
       return typeof result === "string" ? result : JSON.stringify(result, null, 2);
     },
   });
@@ -213,7 +229,7 @@ export default async function plugin(bb: BbPluginApi) {
       for (const [k, v] of Object.entries(args)) {
         if (v !== undefined) clean[k] = v;
       }
-      const result = await client.callTool("noema_remember", clean);
+      const result = await client.callTool(serverTools.noema_remember, clean);
       return typeof result === "string" ? result : JSON.stringify(result, null, 2);
     },
   });
@@ -223,7 +239,7 @@ export default async function plugin(bb: BbPluginApi) {
     description: `Read a specific Noema memory trace by ID, including its full body`,
     parameters: recallSchema,
     async execute({ id }) {
-      const result = await client.callTool("noema_recall", { id });
+      const result = await client.callTool(serverTools.noema_recall, { id });
       return typeof result === "string" ? result : JSON.stringify(result, null, 2);
     },
   });
@@ -237,7 +253,7 @@ export default async function plugin(bb: BbPluginApi) {
       for (const [k, v] of Object.entries(args)) {
         if (v !== undefined) clean[k] = v;
       }
-      const result = await client.callTool("noema_list", clean);
+      const result = await client.callTool(serverTools.noema_list, clean);
       return typeof result === "string" ? result : JSON.stringify(result, null, 2);
     },
   });
@@ -251,7 +267,7 @@ export default async function plugin(bb: BbPluginApi) {
       for (const [k, v] of Object.entries(args)) {
         if (v !== undefined) clean[k] = v;
       }
-      const result = await client.callTool("noema_update", clean);
+      const result = await client.callTool(serverTools.noema_update, clean);
       return typeof result === "string" ? result : JSON.stringify(result, null, 2);
     },
   });
@@ -261,7 +277,7 @@ export default async function plugin(bb: BbPluginApi) {
     description: `Show the derivation graph for a Noema trace: what it was derived from and what derives from it`,
     parameters: lineageSchema,
     async execute({ id }) {
-      const result = await client.callTool("noema_lineage", { id });
+      const result = await client.callTool(serverTools.noema_lineage, { id });
       return typeof result === "string" ? result : JSON.stringify(result, null, 2);
     },
   });
